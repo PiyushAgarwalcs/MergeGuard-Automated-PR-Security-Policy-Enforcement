@@ -1,5 +1,9 @@
 # MergeGuard
 
+[![CI](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/ci.yml)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3110/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 **A multi-agent pull request review and deployment gate.**
 
 MergeGuard coordinates five specialist agents to analyze pull requests, apply risk-based deployment policy, and publish an audit report. Deterministic tools perform checks and enforce critical security outcomes; agents coordinate the review and hand off decisions through Band.

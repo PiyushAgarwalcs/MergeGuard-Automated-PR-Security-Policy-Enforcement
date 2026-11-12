@@ -1,135 +1,161 @@
-# MergeGuard-Automated-PR-Security-Policy-Enforcement
+# MergeGuard
 
- turns code review from a human bottleneck into an autonomous, auditable team. When a pull request opens, a GitHub webhook spins up a chat room where five agents — **Scan, Security, Risk, Deploy, Report** — collaborate via `@mentions`, each with a distinct job. Critical findings **block the deployment** and escalate to a human *in the same chat*. Remove Band and the chain collapses: never receives its green light.
+**A multi-agent pull request review and deployment gate.**
 
----
+MergeGuard coordinates five specialist agents to analyze pull requests, apply risk-based deployment policy, and publish an audit report. Deterministic tools perform checks and enforce critical security outcomes; agents coordinate the review and hand off decisions through Band.
 
-## Why it's different
-
-Most "AI code reviewers" are a single model with a long prompt.a **real review team**:
-
-- 🧩 **True multi-agent collaboration** — five independent Band identities, separate tools and prompts, communicating through real chat hand-offs (not one model role-playing five).
-- 🚦 **It takes a real action** — gates an actual GitHub Actions deployment (`workflow_dispatch`), not just text output.
-- 👤 **Human-in-the-loop, in-channel** — escalations `@mention` the on-call engineer, who replies `APPROVE` / `REJECT` inline.
-- 🔒 **Deterministic where it matters** — verdicts, the CRIT block comment, and the audit report are produced by **code, not model judgment**, so the security outcome is reliable even on small open-source models. (See [Engineering for reliability](#engineering-for-reliability).)
-- ☁️ **Actually deployed** — live webhook + all five agents running in the cloud on Railway.
-
----
-
-## How it works
+## Review workflow
 
 ```mermaid
 flowchart TD
-    Dev([Developer opens / updates PR]) -->|"webhook + HMAC-SHA256"| WH["FastAPI Webhook<br/>(Railway)"]
-    WH --> V{"valid signature<br/>& base = main?"}
-    V -->|no| Drop["ignore / 401"]
-    V -->|yes| Room["Create Band room<br/>add 5 agents + engineer<br/>ping @ScanAgent"]
-    Room --> Scan
+    PR["Developer opens or updates a pull request"] --> GH["GitHub pull_request event"]
+    GH --> WH["FastAPI webhook<br/>HMAC-SHA256 verification"]
+    WH --> VALID{"Valid signature<br/>and base branch is main?"}
+    VALID -->|No| IGNORE["Ignore event or reject request"]
+    VALID -->|Yes| ROOM["Create Band room<br/>add agents and on-call engineer"]
 
-    subgraph BAND["🟣 Band multi-agent chat room"]
-        direction TB
-        Scan["🔍 ScanAgent<br/>lint · tests · deps"] -->|PASS / WARN| Sec["🛡️ SecurityAgent<br/>vuln + secrets scan"]
-        Scan -->|BLOCK| Eng
-        Sec -->|"PASS / WARN"| Risk["⚖️ RiskAgent<br/>risk score 0–100"]
-        Sec -->|"CRIT → BLOCK<br/>(auto-posts PR comment)"| Eng
-        Risk -->|"score < 71 → PASS"| Deploy["🚀 DeployAgent<br/>workflow_dispatch"]
-        Risk -->|"score ≥ 71 → ESCALATE"| Eng["👤 On-call Engineer<br/>(human, in-chat)"]
-        Eng -->|APPROVE| Deploy
-        Eng -->|REJECT| Report
-        Deploy --> Report["📋 ReportAgent<br/>audit report"]
+    subgraph REVIEW["MergeGuard review · Band agent hand-offs"]
+        direction LR
+        SCAN["ScanAgent<br/>Lint · tests · dependency audit"] --> SCAN_RESULT{"Scan verdict"}
+        SCAN_RESULT -->|PASS / WARN| SECURITY["SecurityAgent<br/>Vulnerability and secrets scan"]
+        SCAN_RESULT -->|BLOCK| ENGINEER["On-call engineer<br/>APPROVE / REJECT"]
+        SECURITY --> SEVERITY{"Highest finding"}
+        SEVERITY -->|LOW / MED / HIGH| RISK["RiskAgent<br/>Weighted score · 0–100"]
+        SEVERITY -->|CRITICAL| BLOCK["Post critical finding<br/>and block deployment"]
+        BLOCK --> ENGINEER
+        RISK --> SCORE{"Risk score"}
+        SCORE -->|"< 71 · PASS"| DEPLOY["DeployAgent<br/>Only after approval"]
+        SCORE -->|"≥ 71 · ESCALATE"| ENGINEER
+        ENGINEER -->|APPROVE| DEPLOY
+        ENGINEER -->|REJECT| REPORT["ReportAgent<br/>Assemble audit trail"]
+        DEPLOY --> ACTIONS["Trigger GitHub Actions<br/>workflow_dispatch"]
+        ACTIONS --> REPORT
     end
 
-    Sec -.-> PR[["PR comments"]]
-    Deploy -.-> PR
-    Report --> PR
-    Report --> Done([Chain complete])
+    ROOM --> SCAN
+    REPORT --> AUDIT["Post audit summary<br/>to the pull request"]
+
+    classDef scan fill:#DBEAFE,stroke:#2563EB,color:#172554,stroke-width:2px;
+    classDef security fill:#FCE7F3,stroke:#DB2777,color:#500724,stroke-width:2px;
+    classDef risk fill:#FEF3C7,stroke:#D97706,color:#451A03,stroke-width:2px;
+    classDef deploy fill:#DCFCE7,stroke:#16A34A,color:#052E16,stroke-width:2px;
+    classDef report fill:#EDE9FE,stroke:#7C3AED,color:#2E1065,stroke-width:2px;
+    classDef human fill:#FFE4E6,stroke:#E11D48,color:#4C0519,stroke-width:2px;
+    classDef system fill:#E2E8F0,stroke:#475569,color:#0F172A;
+    classDef decision fill:#FFFFFF,stroke:#64748B,color:#0F172A;
+    classDef blocked fill:#FEE2E2,stroke:#DC2626,color:#450A0A,stroke-width:2px;
+
+    class SCAN scan;
+    class SECURITY security;
+    class RISK risk;
+    class DEPLOY deploy;
+    class REPORT report;
+    class ENGINEER human;
+    class GH,WH,ROOM,ACTIONS,AUDIT,PR,IGNORE system;
+    class VALID,SCAN_RESULT,SEVERITY,SCORE decision;
+    class BLOCK blocked;
 ```
 
-- **Clean PR (happy path):** `Scan → Security → Risk → Deploy → Report` → deploys automatically and posts an audit report.
-- **Vulnerable PR (block path):** the chain **fails fast** — SecurityAgent catches the issue, auto-posts a `CRITICAL` PR comment, blocks the deploy, and escalates to the engineer.
+Each agent has its own color in the diagram: **Scan** blue, **Security** pink, **Risk** amber, **Deploy** green, and **Report** purple. The on-call engineer is shown in red.
 
-> 📐 Full pipeline, decision branches, risk weights, and deployment topology: **[ARCHITECTURE.md](ARCHITECTURE.md)**
+### Agent responsibilities
 
----
+| Agent | Responsibility | Key outcome |
+|---|---|---|
+| **ScanAgent** | Runs static analysis, tests, and dependency auditing. | Passes findings onward or blocks the review. |
+| **SecurityAgent** | Scans the pull request diff for vulnerabilities and secrets. | Critical findings create a PR comment and block deployment. |
+| **RiskAgent** | Scores risk from change characteristics and upstream warnings. | Scores below 71 pass; scores of 71 or higher require human review. |
+| **DeployAgent** | Triggers the configured GitHub Actions deployment workflow. | Runs only after the review is approved. |
+| **ReportAgent** | Collects review and deployment outcomes. | Publishes the final audit summary. |
 
-## The five agents
+For detailed decision branches, risk weights, and deployment topology, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-| # | Agent | Responsibility | Tools | Outcome |
-|---|-------|----------------|-------|---------|
-| 1 | 🔍 **ScanAgent** | static analysis, tests, dependency CVEs | `ruff`, `pytest`, `pip-audit`, GitHub | PASS / WARN / BLOCK |
-| 2 | 🛡️ **SecurityAgent** | deep vulnerability + secrets scan | `security_review` (OWASP regex + auto-comment) | PASS / WARN / **BLOCK** |
-| 3 | ⚖️ **RiskAgent** | weighted risk score (auth/payment files, diff size, day) | `risk_scorer` | PASS / **ESCALATE** |
-| 4 | 🚀 **DeployAgent** | fires the real deployment *only if approved* | `deploy_trigger` (`workflow_dispatch`) | DEPLOYED / HELD |
-| 5 | 📋 **ReportAgent** | posts the final audit report | `post_audit_report` | always closes the chain |
+## Design principles
 
-A human gate sits between Risk and Deploy: on **ESCALATE**, the engineer replies `APPROVE` / `REJECT` directly in the Band room.
+- **Deterministic enforcement:** security scanning, risk scoring, deployment triggering, and report assembly are implemented as tools rather than relying solely on model-generated decisions.
+- **Fail closed on critical findings:** a critical security finding blocks deployment and is surfaced on the pull request.
+- **Human approval for elevated risk:** high risk scores and blocked reviews route to the on-call engineer for an in-chat decision.
+- **Traceable outcomes:** the final report summarizes review and deployment results.
 
----
+## Technology
 
-## Engineering for reliability
+| Component | Technology |
+|---|---|
+| Agent coordination | Band (`band-sdk[langgraph]`) |
+| Agent runtime | LangGraph ReAct agents |
+| Model providers | Featherless or AIMLAPI (OpenAI-compatible APIs) |
+| Webhook service | FastAPI with HMAC-SHA256 verification |
+| Review and deployment integration | GitHub API and GitHub Actions |
+| Packaging and deployment | Docker; Railway configuration is included |
+| Quality checks | pytest, Ruff, Black, mypy, GitHub Actions |
 
-Small open-source models are cheap but inconsistent at multi-step orchestration. MergeGuard pushes every **security-critical decision into deterministic code**, so the model only does the talking:
+## Getting started
 
-- **`security_review`** fetches the diff, scans it, and **auto-posts the CRITICAL block comment itself** — the block never depends on the model remembering to.
-- **`post_audit_report`** reconstructs the outcome from real signals (the block comment + the deploy run) and posts a clean audit table — no chat-history parsing required.
-- **Self-healing identifiers** — if a model passes a placeholder repo/PR, the GitHub tools snap to the configured target and its open PR, so the chain always acts on the real PR.
-- **Fail-closed** — if a diff can't be fetched, SecurityAgent escalates for manual review; it never silently approves.
-- **Hand-off discipline** — one delivery per turn, mention allow-listing, and reconnect-resilient agents (`temperature 0` for deterministic decoding).
+### Requirements
 
-Result: the demo's hero artifacts — the **CRITICAL block** and the **audit report** — land on every run.
+- Python 3.11
+- GitHub credentials with the permissions needed to read pull requests, write comments, and dispatch the configured workflow
+- Band agent credentials and a supported model-provider API key
 
----
+### Install
 
-## Tech stack
+Create and activate a virtual environment, then install dependencies:
 
-| Layer | Technology |
-|-------|------------|
-| Multi-agent orchestration | **Band** (`band-sdk[langgraph]`) — `@mention` routing is the chain |
-| Agent runtime | **LangGraph** ReAct agents |
-| LLMs | **Featherless** (Qwen, OpenAI-compatible) |
-| Ingress | **FastAPI** webhook, HMAC-SHA256 verified |
-| Source / CI | **GitHub** PRs + Actions (`workflow_dispatch`), **PyGithub** |
-| Hosting | **Railway** — 2 services: `webhook` (public) + `agents` (all five) |
-| Quality | **pytest** · **ruff** · **black** · **Docker** · GitHub Actions CI |
-
----
-
-## Quickstart
-
-```bash
-python -m venv .venv && .venv/Scripts/activate    # Windows  (use source .venv/bin/activate on *nix)
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-cp .env.example .env                              # fill in Band + Featherless + GitHub credentials
-pytest -q                                         # 22 passing — no network/credentials needed
+Copy-Item .env.example .env
 ```
 
-**Run locally**
+On macOS or Linux:
 
 ```bash
-python -m webhook.main        # webhook on :8000  (binds $PORT in the cloud)
-python -m run_all_agents      # all five agents in one process
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-**Deploy (Railway)** — two services from this repo:
+Set the required values in `.env`. At minimum, configure the Band service and agent credentials, model-provider credentials, `GITHUB_TOKEN`, `TARGET_REPO`, and `GITHUB_WEBHOOK_SECRET`. Set `DEPLOY_WORKFLOW_FILE` to the workflow file in the target repository.
 
-| Service | Start command | Public domain |
-|---------|---------------|---------------|
-| `webhook` | `python -m webhook.main` | ✅ (GitHub webhook target `…/webhook`) |
-| `agents`  | `python -m run_all_agents` | — |
+Do not commit `.env` or real credentials.
 
-Then add a **Pull requests** webhook on the target repo pointing at `https://<webhook-domain>/webhook` with your `GITHUB_WEBHOOK_SECRET`. Open a PR and watch the chain run.
+### Run locally
 
----
+Start the webhook and agent runtime in separate terminals:
+
+```bash
+python -m webhook.main
+```
+
+```bash
+python -m run_all_agents
+```
+
+The webhook listens on port `8000` by default. Configure a GitHub pull-request webhook to reach `/webhook`, using the same secret as `GITHUB_WEBHOOK_SECRET`.
+
+### Run checks
+
+```bash
+ruff check .
+black --check .
+mypy shared/ tools/ webhook/ agents/ --ignore-missing-imports
+pytest tests/ -q
+```
+
+## Deployment
+
+The repository includes a Dockerfile, a Docker Compose configuration, and a GitHub Actions workflow for CI and deployment. The documented Railway layout uses a public `webhook` service (`python -m webhook.main`) and an `agents` service (`python -m run_all_agents`). Configure the required environment variables and deployment secrets in the hosting and GitHub environments before enabling live webhooks or deployment triggers.
 
 ## Repository layout
 
+```text
+agents/              Five specialist agents
+tools/               Scanning, risk, GitHub, deployment, and reporting tools
+shared/              Agent runtime wiring, schemas, and shared helpers
+webhook/             Webhook verification, parsing, and Band room initiation
+tests/               Unit tests and pull-request fixtures
+run_all_agents.py    Runs all five agents in one process
+ARCHITECTURE.md      Pipeline details, risk weights, and deployment topology
 ```
-agents/        five chain agents (scan, security, risk, deploy, report)
-tools/         deterministic tools: security scan, risk scoring, GitHub, deploy, audit
-shared/        Band runtime wiring, LLM factory, handles, schemas
-webhook/       FastAPI receiver: HMAC verify → parse → initiate Band chain
-run_all_agents.py   run all five agents in one service (fits PaaS service caps)
-ARCHITECTURE.md     full pipeline + topology diagrams
-```
-
----

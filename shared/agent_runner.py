@@ -30,8 +30,9 @@ handle to use.
 
 ## Execution protocol — follow exactly
 1. Do your analysis: call each ANALYSIS tool AT MOST ONCE. Never repeat a tool you already
-   called. If a tool errors or returns nothing, treat it as "no findings" and move on —
-   do NOT retry it.
+   called. A failed, missing, stale, or unavailable security/validation result is NOT a
+   clean result: fail closed or escalate to the on-call engineer. Do not turn tool errors
+   into "no findings."
 2. When your analysis is done, make ONE single call to `band_send_message` whose `content`
    is your verdict plus the findings JSON and whose `mentions` is the exact handle named in
    your role section.

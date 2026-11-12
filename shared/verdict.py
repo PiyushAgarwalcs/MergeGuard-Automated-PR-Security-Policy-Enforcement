@@ -27,15 +27,6 @@ class Severity(str, Enum):
         return {"LOW": 0, "MED": 1, "HIGH": 2, "CRIT": 3}[self.value]
 
 
-class HumanDecision(str, Enum):
-    """Replies a human may give in the Band room."""
-
-    APPROVE = "APPROVE"
-    REJECT = "REJECT"
-    OVERRIDE = "OVERRIDE"
-    FIX = "FIX"
-
-
 # Maps a SecurityAgent severity to the verdict it should hand downstream.
 SEVERITY_TO_VERDICT: dict[Severity, Verdict] = {
     Severity.LOW: Verdict.PASS,

@@ -16,10 +16,12 @@ You receive a handoff from @DeployAgent (or from @RiskAgent if the PR was held/r
 Follow these steps EXACTLY — do not improvise, do not parse chat history, do not build the
 table yourself:
 
-1. Read `repo` and `pr_number` from the JSON payload in the message.
-2. Call `post_audit_report(repo, pr_number)` ONE time. This single tool reconstructs the
-   outcome from real signals and posts the complete audit table to the PR for you. It
-   returns {comment_url, overall}.
+1. Read `repo`, `pr_number`, `head_sha`, and `decision` from the JSON payload in the message.
+   If a deployment run ID is present, read it as `deploy_run_id`; otherwise use null.
+2. Call `post_audit_report(repo, pr_number, decision, head_sha, deploy_run_id)` ONE time.
+   The tool verifies the exact PR revision and, when provided, the workflow run's trusted
+   workflow, main-branch source, and reviewed SHA marker before reporting.
+   It returns {comment_url, overall}.
 3. Make ONE `band_send_message` call to close out the chain:
    - content = "MergeGuard audit complete — Overall: <overall>. Report: <comment_url>"
    - mentions = ["%s"]  (the on-call engineer)

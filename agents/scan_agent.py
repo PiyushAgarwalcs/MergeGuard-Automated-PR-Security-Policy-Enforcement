@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from shared.agent_runner import TOOL_DISCIPLINE
 from shared.band_handles import agent_handle, engineer_handle
-from tools.dep_auditor import audit_dependencies
-from tools.github_api import get_pr_diff, get_pr_files, get_pr_metadata, post_pr_comment
-from tools.static_analyzer import run_static_analysis
-from tools.test_runner import run_tests
+from tools.github_api import get_pr_metadata, post_pr_comment
+from tools.pr_validation import validate_pr_commit
 
 _SECURITY = agent_handle("SecurityAgent")
 _ENGINEER = engineer_handle()
@@ -17,23 +15,25 @@ SYSTEM_PROMPT = (
 
 You are @mentioned with a JSON payload describing a new PR. Your job:
 
-1. Call get_pr_metadata(repo, pr_number) to get file list, diff size, author.
-2. Call get_pr_diff(repo, pr_number) to fetch the diff text.
-3. Call run_static_analysis(diff) to lint the changed Python files.
-4. Call run_tests() to run the test suite.
-5. Call audit_dependencies() to check for CVEs.
-6. Decide a verdict:
-   - PASS: no lint errors, tests pass, no CVEs
-   - WARN: lint warnings or minor CVEs (tests still pass)
-   - BLOCK: test failures, critical lint errors, or high-severity CVEs
+1. Call get_pr_metadata(repo, pr_number) to obtain the current head SHA and PR details.
+2. Read `head_sha` from the opening JSON payload. If metadata is an error or the SHA differs,
+   BLOCK and escalate; do not treat unavailable metadata as a clean result.
+3. Call validate_pr_commit(repo, pr_number, head_sha) exactly once. It checks out that
+   exact commit on an isolated GitHub Actions runner and runs Ruff, the PR's tests, and its
+   dependency audit. Do not treat a failed, missing, stale, or timed-out validation as pass.
+4. Decide a verdict:
+   - PASS: isolated validation completed successfully
+   - BLOCK: validation failed, could not run, or the PR changed during review
 
-7. Hand off with a SINGLE band_send_message call:
-   - If PASS or WARN: band_send_message(
-       content="ScanAgent verdict: <VERDICT>\\n<findings_json>",
+5. Hand off with a SINGLE band_send_message call:
+   - If PASS: band_send_message(
+       content="ScanAgent verdict: PASS\\n" + JSON including repo, pr_number, head_sha,
+               validation result, and findings,
        mentions=["%s"])
    - If BLOCK: first call post_pr_comment(repo, pr_number, body) to record the block, then
      band_send_message(
-       content="ScanAgent BLOCK on PR #<n>: <reason>\\n<findings_json>",
+       content="ScanAgent BLOCK on PR #<n>: <reason>\\n" + JSON including repo, pr_number,
+               head_sha, validation result, and findings,
        mentions=["%s"])
 
 Always include your full findings JSON in a fenced ```json block so the next agent can parse it.
@@ -44,11 +44,7 @@ The SecurityAgent handle is "%s". The on-call engineer handle is "%s"."""
 
 TOOLS = [
     get_pr_metadata,
-    get_pr_diff,
-    get_pr_files,
-    run_static_analysis,
-    run_tests,
-    audit_dependencies,
+    validate_pr_commit,
     post_pr_comment,
 ]
 

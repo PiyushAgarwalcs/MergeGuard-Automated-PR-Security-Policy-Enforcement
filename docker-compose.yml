@@ -1,5 +1,3 @@
-version: "3.9"
-
 x-agent-base: &agent-base
   build: .
   env_file: .env
@@ -17,22 +15,6 @@ services:
       timeout: 5s
       retries: 3
 
-  scan-agent:
+  agents:
     <<: *agent-base
-    command: python -m agents.scan_agent
-
-  security-agent:
-    <<: *agent-base
-    command: python -m agents.security_agent
-
-  risk-agent:
-    <<: *agent-base
-    command: python -m agents.risk_agent
-
-  deploy-agent:
-    <<: *agent-base
-    command: python -m agents.deploy_agent
-
-  report-agent:
-    <<: *agent-base
-    command: python -m agents.report_agent
+    command: python -m run_all_agents

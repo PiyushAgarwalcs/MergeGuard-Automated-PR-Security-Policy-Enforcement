@@ -1,0 +1,100 @@
+name: PR Validation
+run-name: MergeGuard PR #${{ inputs.pr_number }} validation ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Target repository in owner/name format
+        required: true
+        type: string
+      pr_number:
+        description: Pull request number
+        required: true
+        type: string
+      head_sha:
+        description: Exact pull request head commit
+        required: true
+        type: string
+      request_id:
+        description: Unique request identifier used to correlate this run
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate requested target
+        env:
+          REQUESTED_REPOSITORY: ${{ inputs.repository }}
+          TARGET_REPOSITORY: ${{ secrets.TARGET_REPO }}
+          REQUESTED_SHA: ${{ inputs.head_sha }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+
+          expected = os.environ.get("TARGET_REPOSITORY", "").strip().lower()
+          requested = os.environ.get("REQUESTED_REPOSITORY", "").strip().lower()
+          sha = os.environ.get("REQUESTED_SHA", "")
+          if not expected or requested != expected:
+              sys.exit("Requested repository does not match TARGET_REPO")
+          if not re.fullmatch(r"[0-9a-f]{40}", sha):
+              sys.exit("Invalid commit SHA")
+          PY
+
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.head_sha }}
+          token: ${{ secrets.GH_PAT }}
+          persist-credentials: false
+          path: source
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install validation tools and project dependencies
+        working-directory: source
+        run: |
+          python -m pip install --upgrade pip pytest pip-audit ruff
+          if [ -f requirements-dev.txt ]; then
+            python -m pip install -r requirements-dev.txt
+          elif [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            python -m pip install .
+          else
+            echo "No supported Python dependency manifest found." >&2
+            exit 1
+          fi
+
+      - name: Run Ruff
+        working-directory: source
+        run: ruff check .
+
+      - name: Run project tests
+        working-directory: source
+        run: python -m pytest -q
+
+      - name: Audit project dependencies
+        working-directory: source
+        run: |
+          if [ -f requirements-dev.txt ]; then
+            pip-audit -r requirements-dev.txt --progress-spinner=off
+          elif [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt --progress-spinner=off
+          elif [ -f pyproject.toml ]; then
+            pip-audit --local --progress-spinner=off
+          else
+            echo "No supported Python dependency manifest found." >&2
+            exit 1
+          fi

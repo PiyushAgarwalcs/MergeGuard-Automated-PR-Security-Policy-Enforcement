@@ -1,43 +1,44 @@
 name: Deploy to Railway
+run-name: MergeGuard deploy ${{ inputs.request_id || github.run_id }} PR #${{ inputs.pr_number || 'push' }} ${{ inputs.head_sha || github.sha }}
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      head_sha:
+        description: Exact reviewed commit to deploy
+        required: true
+        type: string
+      pr_number:
+        description: Reviewed pull request number
+        required: true
+        type: string
+      request_id:
+        description: Unique MergeGuard dispatch identifier
+        required: true
+        type: string
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_sha || github.sha }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Run tests
         run: pytest tests/ -q
-        env:
-          FEATHERLESS_BASE_URL: https://api.featherless.ai/v1
-          FEATHERLESS_API_KEY: ${{ secrets.FEATHERLESS_API_KEY }}
-          SCAN_AGENT_ID: ${{ secrets.SCAN_AGENT_ID }}
-          SCAN_AGENT_API_KEY: ${{ secrets.SCAN_AGENT_API_KEY }}
-          SECURITY_AGENT_ID: ${{ secrets.SECURITY_AGENT_ID }}
-          SECURITY_AGENT_API_KEY: ${{ secrets.SECURITY_AGENT_API_KEY }}
-          RISK_AGENT_ID: ${{ secrets.RISK_AGENT_ID }}
-          RISK_AGENT_API_KEY: ${{ secrets.RISK_AGENT_API_KEY }}
-          DEPLOY_AGENT_ID: ${{ secrets.DEPLOY_AGENT_ID }}
-          DEPLOY_AGENT_API_KEY: ${{ secrets.DEPLOY_AGENT_API_KEY }}
-          REPORT_AGENT_ID: ${{ secrets.REPORT_AGENT_ID }}
-          REPORT_AGENT_API_KEY: ${{ secrets.REPORT_AGENT_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-          TARGET_REPO: ${{ secrets.TARGET_REPO }}
-          GITHUB_WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
-          BAND_SERVICE_API_KEY: ${{ secrets.BAND_SERVICE_API_KEY }}
-          BAND_REST_URL: https://api.band.ai
 
       - name: Log in to GHCR
         uses: docker/login-action@v3

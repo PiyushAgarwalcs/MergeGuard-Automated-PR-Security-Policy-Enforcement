@@ -1,92 +1,99 @@
-# MergeGuard — Architecture & Pipeline
+# MergeGuard architecture
 
-MergeGuard is a multi-agent CI/CD security gate. When a pull request is opened, a GitHub
-webhook spins up a [Band](https://band.ai) chat room where **five specialist AI agents**
-review the change in sequence — linting, scanning for vulnerabilities, scoring risk, and
-deciding whether to deploy — with a human on-call engineer in the loop for escalations.
+MergeGuard reviews pull requests through five Band-coordinated agents. Review actions are
+bound to the PR head SHA captured by the webhook. Tests, lint, and dependency auditing run
+in a separate GitHub Actions job so untrusted PR code never executes in the long-lived
+agent service.
 
-## End-to-end pipeline
+## Review flow
 
 ```mermaid
 flowchart TD
-    Dev([Developer opens / updates PR]) --> GH[GitHub: pull_request event]
-    GH -->|"webhook POST + HMAC-SHA256 signature"| WH["FastAPI Webhook<br/>(Railway)"]
-    WH --> V{"Signature valid<br/>& base branch = main?"}
-    V -->|no| Drop["Ignore (202) / reject (401)"]
-    V -->|yes| Room["Create Band room<br/>add 5 agents + on-call engineer<br/>post opening @ScanAgent"]
-    Room --> Scan
+    PR["GitHub pull_request event"] --> WH["FastAPI webhook<br/>HMAC-SHA256 verification"]
+    WH --> VALID{"Valid signature<br/>and base branch is main?"}
+    VALID -->|No| IGNORE["Ignore or reject"]
+    VALID -->|Yes| ROOM["Create Band room<br/>post PR context and head SHA"]
 
-    subgraph BAND["🟣 Band multi-agent chat room"]
-        direction TB
-        Scan["🔍 ScanAgent<br/>lint · tests · dependency audit"] --> ScanV{verdict}
-        ScanV -->|PASS / WARN| Sec["🛡️ SecurityAgent<br/>vuln + secrets scan (regex + LLM)"]
-        ScanV -->|BLOCK| Eng
-
-        Sec --> SecV{max severity}
-        SecV -->|"LOW/MED → PASS<br/>HIGH → WARN"| Risk["⚖️ RiskAgent<br/>weighted risk score 0–100"]
-        SecV -->|"CRIT → BLOCK"| SecCmt["Post CRITICAL PR comment<br/>(file:line)"] --> Eng
-
-        Risk --> RiskV{"risk score"}
-        RiskV -->|"< 71 → PASS"| Deploy["🚀 DeployAgent"]
-        RiskV -->|"≥ 71 → ESCALATE"| Eng["👤 On-call Engineer<br/>(human, in-chat)"]
-        Eng -->|"reply APPROVE"| Deploy
-        Eng -->|"reply REJECT"| Report
-
-        Deploy --> Trig["Trigger GitHub Actions<br/>workflow_dispatch + poll"]
-        Trig --> Report["📋 ReportAgent<br/>assemble audit trail"]
+    subgraph BAND["Band agent hand-offs"]
+        direction LR
+        SCAN["ScanAgent<br/>dispatch isolated validation"] --> CHECKS["GitHub Actions runner<br/>checkout exact SHA · Ruff · pytest · pip-audit"]
+        CHECKS -->|Pass| SECURITY["SecurityAgent<br/>regex patterns + structured LLM review"]
+        CHECKS -->|Fail, stale, unavailable| ENGINEER["On-call engineer<br/>APPROVE / REJECT"]
+        SECURITY --> SEVERITY{"Security result"}
+        SEVERITY -->|Critical pattern| BLOCK["Post SHA-specific block comment"]
+        BLOCK --> ENGINEER
+        SEVERITY -->|LLM finding or scan error| ENGINEER
+        SEVERITY -->|No critical pattern finding| RISK["RiskAgent<br/>weighted score"]
+        RISK --> SCORE{"Score"}
+        SCORE -->|"< 71"| DEPLOY["DeployAgent<br/>verify current PR SHA"]
+        SCORE -->|"≥ 71 or metadata error"| ENGINEER
+        ENGINEER -->|APPROVE| DEPLOY
+        ENGINEER -->|REJECT| REPORT["ReportAgent"]
+        DEPLOY --> RUN["Dispatch deploy workflow<br/>verify workflow run SHA"]
+        RUN --> REPORT
     end
 
-    SecCmt -.-> PRc[["PR comments"]]
-    Trig -.deploy result.-> PRc
-    Report --> Audit["Post audit summary<br/>(PR comment + Band)"]
-    Audit --> PRc
-    Report --> Done([Chain complete])
+    ROOM --> SCAN
+    REPORT --> AUDIT["Post audit report<br/>verify exact run and reviewed SHA"]
 ```
 
-## The agents
+## Agents and responsibilities
 
-| # | Agent | Tools | Decision |
-|---|-------|-------|----------|
-| 1 | 🔍 **ScanAgent** | `github_api`, `static_analyzer` (ruff), `test_runner` (pytest), `dep_auditor` (pip-audit) | hand off to SecurityAgent, or **BLOCK** to engineer |
-| 2 | 🛡️ **SecurityAgent** | `security_scanner` (regex + LLM), `github_api` | LOW/MED → PASS, HIGH → WARN → RiskAgent; **CRIT → BLOCK** + PR comment → engineer |
-| 3 | ⚖️ **RiskAgent** | `risk_scorer` (weighted heuristics) | score `< 71` → DeployAgent; score `≥ 71` → **ESCALATE** to engineer, await APPROVE/REJECT |
-| 4 | 🚀 **DeployAgent** | `deploy_trigger` (`workflow_dispatch`), `github_api` | fire the real deploy **only if approved** → ReportAgent |
-| 5 | 📋 **ReportAgent** | `github_api` | post the full audit trail; always runs last |
+| Agent | Responsibility | Decision |
+|---|---|---|
+| **ScanAgent** | Dispatches validation for the exact PR head commit. | Any failed, stale, missing, or timed-out result blocks the automatic path. |
+| **SecurityAgent** | Runs deterministic diff patterns and a structured LLM advisory scan. | Critical pattern findings block; LLM findings or scan errors escalate. |
+| **RiskAgent** | Scores changed files, diff size, timing, and upstream warnings. | Scores below 71 pass; higher scores or unavailable metadata escalate. |
+| **DeployAgent** | Dispatches the configured deployment workflow from trusted `main`. | Passes the reviewed SHA as an input and checks the run's unique SHA marker. |
+| **ReportAgent** | Posts the final review and deployment status. | Reports rejected, blocked, failed, in-progress, or unknown states explicitly. |
 
-## Risk scoring (RiskAgent)
+## Isolated PR validation
 
-Weighted heuristics → a 0–100 score; **≥ 71 escalates to a human**:
+`tools/pr_validation.py` dispatches `.github/workflows/pr-validation.yml` in
+`PR_VALIDATION_REPO`. The workflow:
+
+1. Verifies the requested repository against the `TARGET_REPO` Actions secret.
+2. Checks out the requested commit SHA using `GH_PAT`, with `persist-credentials: false`.
+3. Runs Ruff, the PR's pytest suite, and dependency auditing on a GitHub-hosted runner.
+4. Runs with `permissions: {}`. The checked-out code does not receive the checkout token or
+   an Actions write token.
+
+Configure `TARGET_REPO` and `GH_PAT` as Actions secrets in the validation-workflow repository.
+`GH_PAT` needs read-only contents access to the target repository. The service's
+`GITHUB_TOKEN` needs permission to dispatch and inspect workflow runs in `PR_VALIDATION_REPO`.
+
+The target deployment workflow must define `head_sha`, `pr_number`, and `request_id`
+workflow-dispatch inputs, use `head_sha` for checkout, and include both `request_id` and
+`head_sha` in its run name. MergeGuard dispatches the workflow from trusted `main`, never the
+untrusted PR branch; workflows without this contract are rejected or reported as unknown.
+
+## Risk scoring
+
+The score is capped at 100. A score of 71 or more requires human approval.
 
 | Signal | Weight |
-|--------|--------|
+|---|---:|
 | Auth-related files changed | +30 |
 | Payment-related files changed | +40 |
 | Friday deploy | +15 |
-| Diff > 500 lines | +10 |
-| Each upstream WARN | +5 (cap 20) |
+| Diff larger than 500 lines | +10 |
+| Each upstream warning | +5, capped at +20 |
 
-## Two paths through the chain
+If GitHub metadata cannot be fetched or the PR head no longer matches the reviewed SHA,
+RiskAgent escalates rather than calculating a zero-risk score.
 
-- **Clean PR (happy path):** `Scan → Security → Risk → Deploy → Report` — ends in a real deployment and an audit comment.
-- **Risky / vulnerable PR (block path):** the chain **stops early** — a CRIT finding blocks the deploy and escalates to the engineer, who can `APPROVE`/`REJECT` in the same chat.
+## Runtime and deployment
 
-## Tech stack
-
-| Layer | Technology |
-|-------|------------|
-| Multi-agent orchestration | **Band** (agent chat + `@mention` hand-offs) |
-| Agent runtime | **LangGraph** ReAct agents |
-| LLMs | **Featherless** (Qwen models) |
-| Ingress | **FastAPI** webhook (HMAC-verified) |
-| Source / CI | **GitHub** PRs + Actions (`workflow_dispatch`) |
-| Hosting | **Railway** (2 services: `webhook` + `agents`) |
-
-## Deployment topology
+The FastAPI webhook and all five agent loops run as two services:
 
 ```mermaid
 flowchart LR
-    GH["GitHub repo<br/>(pull requests)"] -->|webhook| WHS["Railway: webhook service<br/>python -m webhook.main"]
-    WHS -->|"create room + @ScanAgent"| BANDP["Band platform"]
-    AGS["Railway: agents service<br/>python -m run_all_agents<br/>(5 agents, 1 process)"] <-->|WebSocket| BANDP
-    AGS -->|"PR comments · deploy trigger"| GH
+    GH["GitHub PR"] -->|signed webhook| WEB["Webhook service"]
+    WEB -->|create room| BAND["Band"]
+    AGENTS["Agents service<br/>run_all_agents.py"] <-->|agent hand-offs| BAND
+    AGENTS -->|validation dispatch| ACTIONS["GitHub Actions<br/>isolated validation"]
+    AGENTS -->|deployment dispatch and PR comments| GH
 ```
+
+Docker Compose and the Railway layout use the same two-service model: `webhook`
+(`python -m webhook.main`) and `agents` (`python -m run_all_agents`).

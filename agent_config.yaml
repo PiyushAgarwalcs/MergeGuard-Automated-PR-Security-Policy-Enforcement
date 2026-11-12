@@ -32,7 +32,7 @@ agents:
     key_env: RISK_AGENT_API_KEY
     provider: featherless
     # Was Qwen3-235B (high concurrency-unit cost that 429'd under the small Featherless plan).
-    # The 0–100 risk math lives in the calculate_risk_score tool; the LLM only orchestrates.
+    # The 0–100 risk math lives in the assess_risk tool; the LLM only orchestrates.
     model: Qwen/Qwen3-30B-A3B-Instruct-2507      # judgment / synthesis, low concurrency cost
   deploy:
     id_env: DEPLOY_AGENT_ID

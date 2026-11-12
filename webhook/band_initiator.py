@@ -14,6 +14,7 @@ abort chat creation / the opening message.
 
 from __future__ import annotations
 
+import json
 import os
 
 from band.client.rest import (
@@ -24,7 +25,6 @@ from band.client.rest import (
     RestClient,
 )
 
-from shared.band_helpers import format_payload
 from shared.context_schema import PRContext
 
 # (env var holding the Band agent id, display handle) for each chain agent.
@@ -99,7 +99,7 @@ def initiate_chain(pr: PRContext) -> str:
         f"@ScanAgent New PR #{pr.pr_number} by @{pr.author} targeting "
         f"`{pr.base_branch}` — begin MergeGuard safety review.\n"
         f"Engineer on-call: {engineer}\n"
-        f"{format_payload(pr.model_dump())}"
+        f"```json\n{json.dumps(pr.model_dump(), indent=2, default=str)}\n```"
     )
 
     mentions: list[ChatMessageRequestMentionsItem] = []

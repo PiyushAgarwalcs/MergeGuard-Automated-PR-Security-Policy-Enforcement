@@ -32,39 +32,23 @@ def test_security_scanner_passes_clean_diff():
     assert crit_findings == [], f"Unexpected CRIT in clean diff: {crit_findings}"
 
 
-def test_scan_for_vulnerabilities_tool_vuln():
-    from tools.security_scanner import scan_for_vulnerabilities
-
-    diff = (FIXTURES / "vuln_pr_diff.txt").read_text()
-    result = scan_for_vulnerabilities.invoke({"diff": diff, "use_llm": False})
-    assert result["verdict"] == "BLOCK"
-    assert result["max_severity"] == "CRIT"
-    assert len(result["findings"]) > 0
-
-
-def test_scan_for_vulnerabilities_tool_clean():
-    from tools.security_scanner import scan_for_vulnerabilities
-
-    diff = (FIXTURES / "clean_pr_diff.txt").read_text()
-    result = scan_for_vulnerabilities.invoke({"diff": diff, "use_llm": False})
-    assert result["verdict"] in ("PASS", "WARN")
-    assert result["max_severity"] != "CRIT"
-
-
 def test_security_review_blocks_and_autoposts(monkeypatch):
     """The deterministic review tool must auto-post the CRIT comment + escalate, with no
     dependence on the LLM. This locks the demo's hero visual."""
     import os
 
     os.environ.setdefault("BAND_USERNAME", "danny.ssd7")
-    monkeypatch.setenv(
-        "TARGET_REPO", ""
-    )  # keep the test offline/hermetic (blocks load_dotenv re-inject)
+    monkeypatch.setenv("TARGET_REPO", "x/y")
     from langchain_core.tools import tool
 
     import tools.github_api as gh
 
     posted: list[str] = []
+
+    @tool
+    def _meta(repo: str, pr_number: int) -> dict:
+        """fake"""
+        return {"head_sha": "a" * 40}
 
     @tool
     def _diff(repo: str, pr_number: int) -> str:
@@ -77,12 +61,15 @@ def test_security_review_blocks_and_autoposts(monkeypatch):
         posted.append(body)
         return "https://github.com/x/y/pull/1#comment-1"
 
+    monkeypatch.setattr(gh, "get_pr_metadata", _meta)
     monkeypatch.setattr(gh, "get_pr_diff", _diff)
     monkeypatch.setattr(gh, "post_pr_comment", _post)
 
     from tools.security_scanner import security_review
 
-    r = security_review.invoke({"repo": "x/y", "pr_number": 1})
+    r = security_review.invoke(
+        {"repo": "x/y", "pr_number": 1, "expected_head_sha": "a" * 40}
+    )
     assert r["verdict"] == "BLOCK"
     assert len(posted) == 1, "must auto-post exactly one CRIT comment"
     assert r["handoff"].endswith("danny.ssd7"), "BLOCK escalates to the engineer"
@@ -92,14 +79,17 @@ def test_security_review_clean_routes_to_risk(monkeypatch):
     import os
 
     os.environ.setdefault("BAND_USERNAME", "danny.ssd7")
-    monkeypatch.setenv(
-        "TARGET_REPO", ""
-    )  # keep the test offline/hermetic (blocks load_dotenv re-inject)
+    monkeypatch.setenv("TARGET_REPO", "x/y")
     from langchain_core.tools import tool
 
     import tools.github_api as gh
 
     posted: list[str] = []
+
+    @tool
+    def _meta(repo: str, pr_number: int) -> dict:
+        """fake"""
+        return {"head_sha": "a" * 40}
 
     @tool
     def _diff(repo: str, pr_number: int) -> str:
@@ -112,82 +102,104 @@ def test_security_review_clean_routes_to_risk(monkeypatch):
         posted.append(body)
         return "url"
 
+    monkeypatch.setattr(gh, "get_pr_metadata", _meta)
     monkeypatch.setattr(gh, "get_pr_diff", _diff)
     monkeypatch.setattr(gh, "post_pr_comment", _post)
 
+    import tools.security_scanner as scanner
+
+    monkeypatch.setattr(scanner, "_llm_scan", lambda diff, agent_key: ([], ""))
     from tools.security_scanner import security_review
 
-    r = security_review.invoke({"repo": "x/y", "pr_number": 2})
+    r = security_review.invoke(
+        {"repo": "x/y", "pr_number": 2, "expected_head_sha": "a" * 40}
+    )
     assert r["verdict"] == "PASS"
     assert posted == [], "clean diff must NOT post a comment"
     assert "riskagent" in r["handoff"], "PASS hands off to RiskAgent"
+
+
+def test_security_review_escalates_when_head_changed(monkeypatch):
+    import os
+
+    os.environ.setdefault("BAND_USERNAME", "danny.ssd7")
+    monkeypatch.setenv("TARGET_REPO", "x/y")
+    from langchain_core.tools import tool
+
+    import tools.github_api as gh
+
+    @tool
+    def _meta(repo: str, pr_number: int) -> dict:
+        """fake"""
+        return {"head_sha": "b" * 40}
+
+    monkeypatch.setattr(gh, "get_pr_metadata", _meta)
+    from tools.security_scanner import security_review
+
+    result = security_review.invoke(
+        {"repo": "x/y", "pr_number": 2, "expected_head_sha": "a" * 40}
+    )
+    assert result["verdict"] == "ESCALATE"
+    assert "head changed" in result["summary"]
+
+
+def test_llm_security_review_parses_structured_findings(monkeypatch):
+    class FakeLLM:
+        def invoke(self, prompt):
+            return type(
+                "Response",
+                (),
+                {
+                    "content": (
+                        '{"findings":[{"file":"app.py","line":8,"severity":"HIGH",'
+                        '"message":"Unsafe deserialization"}]}'
+                    )
+                },
+            )()
+
+    import shared.llm_factory as factory
+
+    monkeypatch.setattr(factory, "build_llm", lambda agent_key: FakeLLM())
+    from tools.security_scanner import _llm_scan
+
+    findings, error = _llm_scan("diff", "security")
+    assert error == ""
+    assert len(findings) == 1
+    assert findings[0].file == "app.py"
+    assert findings[0].severity.value == "HIGH"
 
 
 # ── risk_scorer ──────────────────────────────────────────────────────────────
 
 
 def test_risk_scorer_auth_file_scores_high():
-    from tools.risk_scorer import calculate_risk_score
+    from tools.risk_scorer import _compute_risk
 
-    result = calculate_risk_score.invoke(
-        {
-            "changed_files": ["app/auth.py"],
-            "additions": 100,
-            "deletions": 10,
-            "scan_verdict": "PASS",
-            "security_verdict": "PASS",
-            "upstream_warn_count": 0,
-        }
-    )
+    result = _compute_risk(["app/auth.py"], 100, 10, "PASS", "PASS", 0)
     assert result["score"] >= 30
     assert "auth_file_touched" in result["factors"]
 
 
 def test_risk_scorer_payment_escalates():
-    from tools.risk_scorer import calculate_risk_score
+    from tools.risk_scorer import _compute_risk
 
-    result = calculate_risk_score.invoke(
-        {
-            "changed_files": ["app/billing.py"],
-            "additions": 200,
-            "deletions": 50,
-            "scan_verdict": "PASS",
-            "security_verdict": "PASS",
-            "upstream_warn_count": 0,
-        }
-    )
+    result = _compute_risk(["app/billing.py"], 200, 50, "PASS", "PASS", 0)
     assert result["score"] >= 40
     assert result["verdict"] in ("PASS", "ESCALATE")
 
 
 def test_risk_scorer_large_diff_adds_points():
-    from tools.risk_scorer import calculate_risk_score
+    from tools.risk_scorer import _compute_risk
 
-    result = calculate_risk_score.invoke(
-        {
-            "changed_files": ["app/utils.py"],
-            "additions": 400,
-            "deletions": 200,
-            "scan_verdict": "PASS",
-            "security_verdict": "PASS",
-            "upstream_warn_count": 0,
-        }
-    )
+    result = _compute_risk(["app/utils.py"], 400, 200, "PASS", "PASS", 0)
     assert result["factors"].get("large_diff") == 10
 
 
 def test_risk_scorer_score_capped_at_100():
-    from tools.risk_scorer import calculate_risk_score
+    from tools.risk_scorer import _compute_risk
 
-    result = calculate_risk_score.invoke(
-        {
-            "changed_files": ["app/auth.py", "app/billing.py"],
-            "additions": 600,
-            "deletions": 100,
-            "scan_verdict": "WARN",
-            "security_verdict": "WARN",
-            "upstream_warn_count": 4,
-        }
+    result = _compute_risk(
+        ["app/auth.py", "app/billing.py"], 600, 100, "WARN", "WARN", 4
     )
     assert result["score"] <= 100
 
@@ -197,7 +209,7 @@ def _mock_meta(monkeypatch, changed_files):
     import os
 
     os.environ.setdefault("BAND_USERNAME", "danny.ssd7")
-    monkeypatch.setenv("TARGET_REPO", "")
+    monkeypatch.setenv("TARGET_REPO", "x/y")
     from langchain_core.tools import tool
 
     import tools.github_api as gh
@@ -205,7 +217,12 @@ def _mock_meta(monkeypatch, changed_files):
     @tool
     def _meta(repo: str, pr_number: int) -> dict:
         """fake"""
-        return {"changed_files": changed_files, "additions": 10, "deletions": 0}
+        return {
+            "changed_files": changed_files,
+            "additions": 10,
+            "deletions": 0,
+            "head_sha": "a" * 40,
+        }
 
     monkeypatch.setattr(gh, "get_pr_metadata", _meta)
 
@@ -220,6 +237,7 @@ def test_assess_risk_challenges_sensitive_passed_change(monkeypatch):
         {
             "repo": "x/y",
             "pr_number": 1,
+            "expected_head_sha": "a" * 40,
             "scan_verdict": "PASS",
             "security_verdict": "PASS",
         }
@@ -236,6 +254,7 @@ def test_assess_risk_endorses_nonsensitive_change(monkeypatch):
         {
             "repo": "x/y",
             "pr_number": 2,
+            "expected_head_sha": "a" * 40,
             "scan_verdict": "PASS",
             "security_verdict": "PASS",
         }
@@ -243,43 +262,307 @@ def test_assess_risk_endorses_nonsensitive_change(monkeypatch):
     assert r["cross_check"] == "endorsed"
 
 
-# ── dep_auditor ──────────────────────────────────────────────────────────────
+def test_assess_risk_escalates_when_metadata_is_unavailable(monkeypatch):
+    _mock_meta(monkeypatch, [])
+    from langchain_core.tools import tool
 
+    import tools.github_api as gh
 
-def test_dep_audit_skips_host_manifest_cleanly(tmp_path):
-    """An agent-runtime manifest (contains band-sdk/langgraph) must skip instantly with a
-    clean, professional message — never run pip-audit, never surface a TimeoutError."""
-    from tools.dep_auditor import audit_dependencies
+    @tool
+    def _failed_meta(repo: str, pr_number: int) -> dict:
+        """fake"""
+        return {"error": "GitHub unavailable"}
 
-    req = tmp_path / "requirements.txt"
-    req.write_text("band-sdk[langgraph]==1.0.0\nlangchain-core>=0.3\nfastapi>=0.110\n")
-    result = audit_dependencies.invoke({"requirements_file": str(req)})
-    assert result["cve_count"] == 0
-    assert "not required" in result["summary"]
-    assert (
-        "TimeoutError" not in result["summary"] and "skipped:" not in result["summary"]
+    monkeypatch.setattr(gh, "get_pr_metadata", _failed_meta)
+    from tools.risk_scorer import assess_risk
+
+    result = assess_risk.invoke(
+        {
+            "repo": "x/y",
+            "pr_number": 3,
+            "expected_head_sha": "a" * 40,
+            "scan_verdict": "PASS",
+            "security_verdict": "PASS",
+        }
     )
+    assert result["verdict"] == "ESCALATE"
+    assert result["handoff"].endswith("danny.ssd7")
+    assert "error" in result
 
 
-def test_dep_audit_missing_file_is_clean(tmp_path):
-    from tools.dep_auditor import audit_dependencies
+def test_assess_risk_never_overrides_upstream_block(monkeypatch):
+    import os
 
-    result = audit_dependencies.invoke(
-        {"requirements_file": str(tmp_path / "nope.txt")}
+    os.environ.setdefault("BAND_USERNAME", "danny.ssd7")
+    from tools.risk_scorer import assess_risk
+
+    result = assess_risk.invoke(
+        {
+            "repo": "x/y",
+            "pr_number": 3,
+            "expected_head_sha": "a" * 40,
+            "scan_verdict": "BLOCK",
+            "security_verdict": "PASS",
+        }
     )
-    assert result["cve_count"] == 0
-    assert "skipped" in result["summary"]
+    assert result["verdict"] == "ESCALATE"
+    assert result["handoff"].endswith("danny.ssd7")
 
 
-# ── static_analyzer ──────────────────────────────────────────────────────────
+def test_resolve_target_rejects_mismatched_repository(monkeypatch):
+    import pytest
+
+    from tools.github_api import _resolve_target
+
+    monkeypatch.setenv("TARGET_REPO", "owner/target")
+    with pytest.raises(ValueError, match="does not match"):
+        _resolve_target("owner/other", 12)
 
 
-def test_static_analyzer_on_clean_python():
-    from tools.static_analyzer import _extract_added_content
+def test_audit_never_claims_deployment_without_a_matching_run():
+    from tools.github_api import _audit_overall
 
-    diff = (FIXTURES / "clean_pr_diff.txt").read_text()
-    content = _extract_added_content(diff)
-    assert isinstance(content, dict)
+    assert _audit_overall("REJECTED", False, None) == "REJECTED"
+    assert _audit_overall("PASS", False, None) == "UNKNOWN"
+    success = type("Run", (), {"status": "completed", "conclusion": "success"})()
+    assert _audit_overall("APPROVED", False, success) == "DEPLOYED_WITH_OVERRIDE"
+
+
+def test_audit_rejects_run_without_reviewed_sha_marker(monkeypatch):
+    from types import SimpleNamespace
+
+    import tools.github_api as gh
+
+    class FakePR:
+        title = "test"
+        user = SimpleNamespace(login="author")
+        head = SimpleNamespace(sha="a" * 40)
+
+        def get_issue_comments(self):
+            return []
+
+        def create_issue_comment(self, body):
+            raise AssertionError("an unverified run must not be reported")
+
+    class FakeRepo:
+        def get_pull(self, number):
+            return FakePR()
+
+        def get_workflow_run(self, run_id):
+            return SimpleNamespace(
+                workflow_id=7,
+                event="workflow_dispatch",
+                head_branch="main",
+                display_title="MergeGuard deploy missing-sha",
+            )
+
+        def get_workflow(self, workflow_file):
+            return SimpleNamespace(id=7)
+
+    class FakeGithub:
+        def get_repo(self, repo):
+            return FakeRepo()
+
+    monkeypatch.setenv("TARGET_REPO", "owner/target")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(gh, "_gh", lambda: FakeGithub())
+    result = gh.post_audit_report.invoke(
+        {
+            "repo": "owner/target",
+            "pr_number": 3,
+            "decision": "PASS",
+            "expected_head_sha": "a" * 40,
+            "deploy_run_id": 123,
+        }
+    )
+    assert result["overall"] == "UNKNOWN"
+    assert "reviewed SHA" in result["error"]
+
+
+def test_validate_pr_commit_rejects_repository_outside_scope(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("TARGET_REPO", "owner/target")
+    from tools.pr_validation import validate_pr_commit
+
+    result = validate_pr_commit.invoke(
+        {
+            "repo": "owner/other",
+            "pr_number": 8,
+            "head_sha": "a" * 40,
+        }
+    )
+    assert result["ok"] is False
+    assert result["status"] == "REJECTED"
+
+
+def test_validate_pr_commit_stops_when_pr_head_changed(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    class FakeRepo:
+        def get_pull(self, number):
+            return SimpleNamespace(
+                base=SimpleNamespace(ref="main"),
+                head=SimpleNamespace(sha="b" * 40),
+            )
+
+        def get_workflow(self, workflow_file):
+            raise AssertionError("stale commits must not be dispatched")
+
+    class FakeGithub:
+        def __init__(self, token):
+            pass
+
+        def get_repo(self, repo):
+            return FakeRepo()
+
+    monkeypatch.setitem(sys.modules, "github", SimpleNamespace(Github=FakeGithub))
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("TARGET_REPO", "owner/target")
+    from tools.pr_validation import validate_pr_commit
+
+    result = validate_pr_commit.invoke(
+        {"repo": "owner/target", "pr_number": 8, "head_sha": "a" * 40}
+    )
+    assert result["status"] == "STALE"
+    assert result["ok"] is False
+
+
+def test_validate_pr_commit_returns_matching_actions_result(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    import tools.pr_validation as validator
+
+    dispatched = {}
+    request_sha = "a" * 40
+
+    class FakeWorkflow:
+        def create_dispatch(self, ref, inputs):
+            dispatched.update(inputs)
+
+    class FakeRepo:
+        def get_pull(self, number):
+            return SimpleNamespace(
+                base=SimpleNamespace(ref="main"),
+                head=SimpleNamespace(sha=request_sha),
+            )
+
+        def get_workflow(self, workflow_file):
+            return FakeWorkflow()
+
+    class FakeGithub:
+        def __init__(self, token):
+            pass
+
+        def get_repo(self, repo):
+            return FakeRepo()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "workflow_runs": [
+                    {
+                        "display_title": (
+                            f"MergeGuard PR validation {dispatched['request_id']}"
+                        ),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "id": 123,
+                        "html_url": "https://github.com/actions/runs/123",
+                    }
+                ]
+            }
+
+    monkeypatch.setitem(sys.modules, "github", SimpleNamespace(Github=FakeGithub))
+    monkeypatch.setattr(validator.httpx, "get", lambda *args, **kwargs: FakeResponse())
+    monkeypatch.setattr(validator.time, "sleep", lambda seconds: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("TARGET_REPO", "owner/target")
+    monkeypatch.setenv("PR_VALIDATION_REPO", "owner/mergeguard")
+
+    result = validator.validate_pr_commit.invoke(
+        {"repo": "owner/target", "pr_number": 8, "head_sha": request_sha}
+    )
+    assert result["ok"] is True
+    assert result["run_id"] == 123
+    assert dispatched["head_sha"] == request_sha
+
+
+def test_deploy_dispatch_uses_trusted_main_and_pinned_sha(monkeypatch):
+    import sys
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    dispatched = {}
+    reviewed_sha = "a" * 40
+    base_sha = "b" * 40
+
+    class FakeWorkflow:
+        id = 7
+
+        def create_dispatch(self, ref, inputs):
+            dispatched.update({"ref": ref, **inputs})
+
+    class FakeRun:
+        event = "workflow_dispatch"
+        head_branch = "main"
+        head_sha = base_sha
+        created_at = datetime.now(timezone.utc) + timedelta(seconds=1)
+        display_title = ""
+        id = 123
+        html_url = "https://github.com/actions/runs/123"
+        status = "completed"
+        conclusion = "success"
+
+    run = FakeRun()
+
+    class FakeRepo:
+        def get_pull(self, number):
+            return SimpleNamespace(
+                base=SimpleNamespace(ref="main", sha=base_sha),
+                head=SimpleNamespace(ref="feature", sha=reviewed_sha),
+            )
+
+        def get_workflow(self, workflow_file):
+            return FakeWorkflow()
+
+        def get_workflow_runs(self, workflow_id, branch):
+            run.display_title = (
+                f"MergeGuard deploy {dispatched['request_id']} {reviewed_sha}"
+            )
+            return [run]
+
+        def get_workflow_run(self, run_id):
+            return run
+
+    class FakeGithub:
+        def __init__(self, token):
+            pass
+
+        def get_repo(self, repo):
+            return FakeRepo()
+
+    monkeypatch.setitem(sys.modules, "github", SimpleNamespace(Github=FakeGithub))
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setenv("TARGET_REPO", "owner/target")
+    from tools.deploy_trigger import trigger_deployment
+
+    result = trigger_deployment.invoke(
+        {
+            "repo": "owner/target",
+            "pr_number": 8,
+            "expected_head_sha": reviewed_sha,
+        }
+    )
+    assert result["success"] is True
+    assert dispatched["ref"] == "main"
+    assert dispatched["head_sha"] == reviewed_sha
+    assert dispatched["pr_number"] == "8"
+    assert dispatched["request_id"]
 
 
 # ── webhook parser + verifier ─────────────────────────────────────────────────

@@ -1,12 +1,48 @@
 # MergeGuard
 
+**Build status**<br>
 [![CI](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/ci.yml)
-[![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3110/)
+[![PR Validation](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/pr-validation.yml/badge.svg?branch=main)](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/pr-validation.yml)
+[![Deployment](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/PiyushAgarwalcs/MergeGuard-Automated-PR-Security-Policy-Enforcement/actions/workflows/deploy.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
+**Agents and models**<br>
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3110/)
+[![Band SDK](https://img.shields.io/badge/Band-SDK-734F96)](https://band.ai/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-agents-1C3C3C)](https://langchain-ai.github.io/langgraph/)
+[![LangChain](https://img.shields.io/badge/LangChain-framework-1C3C3C)](https://python.langchain.com/)
+[![LangChain OpenAI](https://img.shields.io/badge/LangChain-OpenAI%20integration-1C3C3C)](https://python.langchain.com/docs/integrations/chat/openai/)
+[![Featherless AI](https://img.shields.io/badge/Featherless-AI-6C47FF)](https://featherless.ai/)
+[![AIMLAPI](https://img.shields.io/badge/AIMLAPI-models-0B6E99)](https://aimlapi.com/)
+
+**API and configuration**<br>
+[![FastAPI](https://img.shields.io/badge/FastAPI-webhook-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Uvicorn](https://img.shields.io/badge/Uvicorn-ASGI-4051B5)](https://www.uvicorn.org/)
+[![HTTPX](https://img.shields.io/badge/HTTPX-client-5A29E4)](https://www.python-httpx.org/)
+[![PyGithub](https://img.shields.io/badge/PyGithub-GitHub_API-181717?logo=github&logoColor=white)](https://pygithub.readthedocs.io/)
+[![Pydantic](https://img.shields.io/badge/Pydantic-validation-E92063)](https://docs.pydantic.dev/)
+[![PyYAML](https://img.shields.io/badge/PyYAML-config-CC0000)](https://pyyaml.org/)
+[![python-dotenv](https://img.shields.io/badge/python--dotenv-config-3776AB?logo=python&logoColor=white)](https://github.com/theskumar/python-dotenv)
+
+**Infrastructure**<br>
+[![GitHub Actions](https://img.shields.io/badge/GitHub-Actions-2088FF?logo=githubactions&logoColor=white)](https://docs.github.com/actions)
+[![Docker](https://img.shields.io/badge/Docker-containers-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![Railway](https://img.shields.io/badge/Railway-deployment-0B0D0E)](https://railway.com/)
+
+**Quality checks**<br>
+[![pytest](https://img.shields.io/badge/pytest-tests-0A9EDC?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+[![pytest-asyncio](https://img.shields.io/badge/pytest--asyncio-tests-0A9EDC)](https://pytest-asyncio.readthedocs.io/)
+[![pip-audit](https://img.shields.io/badge/pip--audit-dependencies-2D6A4F)](https://github.com/pypa/pip-audit)
+[![Ruff](https://img.shields.io/badge/Ruff-lint-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
+[![Black](https://img.shields.io/badge/Black-format-000000?logo=python&logoColor=white)](https://black.readthedocs.io/)
+[![mypy](https://img.shields.io/badge/mypy-types-2A6DB2)](https://mypy.readthedocs.io/)
 
 **A multi-agent pull request review and deployment gate.**
 
-MergeGuard coordinates five specialist agents to analyze pull requests, apply risk-based deployment policy, and publish an audit report. Deterministic tools perform checks and enforce critical security outcomes; agents coordinate the review and hand off decisions through Band.
+MergeGuard coordinates five specialist agents to analyze pull requests, apply risk-based deployment policy, and publish an audit report. Deterministic tools enforce the review gates; pull-request tests, lint, and dependency audits run on an isolated GitHub Actions runner against the exact reviewed commit.
+
+[Workflow](#review-workflow) · [Technology](#technology) · [Getting started](#getting-started) · [Deployment](#deployment)
 
 ## Review workflow
 
@@ -20,15 +56,15 @@ flowchart TD
 
     subgraph REVIEW["MergeGuard review · Band agent hand-offs"]
         direction LR
-        SCAN["ScanAgent<br/>Lint · tests · dependency audit"] --> SCAN_RESULT{"Scan verdict"}
-        SCAN_RESULT -->|PASS / WARN| SECURITY["SecurityAgent<br/>Vulnerability and secrets scan"]
+        SCAN["ScanAgent<br/>Validate exact PR SHA in isolation"] --> SCAN_RESULT{"Ruff · tests · dependency audit"}
+        SCAN_RESULT -->|PASS| SECURITY["SecurityAgent<br/>Pattern scan + structured LLM review"]
         SCAN_RESULT -->|BLOCK| ENGINEER["On-call engineer<br/>APPROVE / REJECT"]
         SECURITY --> SEVERITY{"Highest finding"}
         SEVERITY -->|LOW / MED / HIGH| RISK["RiskAgent<br/>Weighted score · 0–100"]
         SEVERITY -->|CRITICAL| BLOCK["Post critical finding<br/>and block deployment"]
         BLOCK --> ENGINEER
         RISK --> SCORE{"Risk score"}
-        SCORE -->|"< 71 · PASS"| DEPLOY["DeployAgent<br/>Only after approval"]
+        SCORE -->|"< 71 · PASS"| DEPLOY["DeployAgent<br/>Trusted workflow · pinned SHA"]
         SCORE -->|"≥ 71 · ESCALATE"| ENGINEER
         ENGINEER -->|APPROVE| DEPLOY
         ENGINEER -->|REJECT| REPORT["ReportAgent<br/>Assemble audit trail"]
@@ -66,32 +102,33 @@ Each agent has its own color in the diagram: **Scan** blue, **Security** pink, *
 
 | Agent | Responsibility | Key outcome |
 |---|---|---|
-| **ScanAgent** | Runs static analysis, tests, and dependency auditing. | Passes findings onward or blocks the review. |
-| **SecurityAgent** | Scans the pull request diff for vulnerabilities and secrets. | Critical findings create a PR comment and block deployment. |
+| **ScanAgent** | Dispatches Ruff, the PR test suite, and dependency auditing on an isolated runner. | Failed, stale, or unavailable validation blocks the automatic path. |
+| **SecurityAgent** | Scans the exact PR diff with deterministic patterns and a structured LLM review. | Critical pattern findings block; LLM findings or scan errors require human review. |
 | **RiskAgent** | Scores risk from change characteristics and upstream warnings. | Scores below 71 pass; scores of 71 or higher require human review. |
-| **DeployAgent** | Triggers the configured GitHub Actions deployment workflow. | Runs only after the review is approved. |
-| **ReportAgent** | Collects review and deployment outcomes. | Publishes the final audit summary. |
+| **DeployAgent** | Dispatches the trusted deployment workflow from `main` with the reviewed SHA. | Runs only after approval and verifies the correlated workflow run. |
+| **ReportAgent** | Collects review and deployment outcomes. | Reports the decision and only claims success for the verified run. |
 
 For detailed decision branches, risk weights, and deployment topology, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Design principles
 
 - **Deterministic enforcement:** security scanning, risk scoring, deployment triggering, and report assembly are implemented as tools rather than relying solely on model-generated decisions.
-- **Fail closed on critical findings:** a critical security finding blocks deployment and is surfaced on the pull request.
+- **Fail closed:** critical findings, stale commits, and unavailable validation or metadata cannot pass automatically.
+- **Untrusted code stays isolated:** PR tests and dependency installation run on an ephemeral GitHub-hosted runner with no workflow write permissions and no checkout credentials persisted to the workspace.
 - **Human approval for elevated risk:** high risk scores and blocked reviews route to the on-call engineer for an in-chat decision.
 - **Traceable outcomes:** the final report summarizes review and deployment results.
 
 ## Technology
 
-| Component | Technology |
+| Area | Technologies |
 |---|---|
-| Agent coordination | Band (`band-sdk[langgraph]`) |
-| Agent runtime | LangGraph ReAct agents |
-| Model providers | Featherless or AIMLAPI (OpenAI-compatible APIs) |
-| Webhook service | FastAPI with HMAC-SHA256 verification |
-| Review and deployment integration | GitHub API and GitHub Actions |
-| Packaging and deployment | Docker; Railway configuration is included |
-| Quality checks | pytest, Ruff, Black, mypy, GitHub Actions |
+| Language and agent orchestration | Python 3.11, Band SDK, LangGraph, LangChain Core, LangChain OpenAI |
+| Model providers | Featherless AI and AIMLAPI |
+| Webhook and HTTP | FastAPI, Uvicorn, HTTPX |
+| GitHub integration | PyGithub, GitHub Actions |
+| Validation and configuration | Pydantic, PyYAML, python-dotenv |
+| Packaging and hosting | Docker, Docker Compose, Railway |
+| Development and security checks | pytest, pytest-asyncio, pip-audit, Ruff, Black, mypy |
 
 ## Getting started
 
@@ -103,7 +140,7 @@ For detailed decision branches, risk weights, and deployment topology, see [ARCH
 
 ### Install
 
-Create and activate a virtual environment, then install dependencies:
+Create and activate a virtual environment, then install runtime dependencies:
 
 ```powershell
 python -m venv .venv
@@ -121,9 +158,13 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set the required values in `.env`. At minimum, configure the Band service and agent credentials, model-provider credentials, `GITHUB_TOKEN`, `TARGET_REPO`, and `GITHUB_WEBHOOK_SECRET`. Set `DEPLOY_WORKFLOW_FILE` to the workflow file in the target repository.
+Set the required values in `.env`. At minimum, configure the Band service and agent credentials, model-provider credentials, `GITHUB_TOKEN`, `TARGET_REPO`, and `GITHUB_WEBHOOK_SECRET`. `PR_VALIDATION_REPO` identifies the repository that hosts this project's `pr-validation.yml` workflow; the GitHub token must be able to dispatch it. Set `DEPLOY_WORKFLOW_FILE` to the workflow file in the target repository.
 
 Do not commit `.env` or real credentials.
+
+In the validation-workflow repository, configure `TARGET_REPO` and `GH_PAT` as Actions secrets. `GH_PAT` needs read-only contents access to the target repository for checkout. The service's `GITHUB_TOKEN` needs permission to dispatch and inspect workflow runs in `PR_VALIDATION_REPO`. The validation job disables `GITHUB_TOKEN` permissions and does not persist checkout credentials.
+
+The target's deployment workflow must accept `head_sha`, `pr_number`, and `request_id` as `workflow_dispatch` inputs, check out and deploy the artifact built from `head_sha`, and include the request ID and SHA in its run name. MergeGuard dispatches only the workflow version from trusted `main`; a target workflow that does not honor this contract is not treated as a verified deployment.
 
 ### Run locally
 
@@ -142,15 +183,18 @@ The webhook listens on port `8000` by default. Configure a GitHub pull-request w
 ### Run checks
 
 ```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q
 ruff check .
 black --check .
 mypy shared/ tools/ webhook/ agents/ --ignore-missing-imports
-pytest tests/ -q
 ```
+
+These are MergeGuard's own unit and quality checks. For local checks, install `requirements-dev.txt`; PR code is tested by the dispatched isolated workflow, not by running it inside the long-lived agent service.
 
 ## Deployment
 
-The repository includes a Dockerfile, a Docker Compose configuration, and a GitHub Actions workflow for CI and deployment. The documented Railway layout uses a public `webhook` service (`python -m webhook.main`) and an `agents` service (`python -m run_all_agents`). Configure the required environment variables and deployment secrets in the hosting and GitHub environments before enabling live webhooks or deployment triggers.
+The repository includes a Dockerfile, a two-service Docker Compose configuration, and GitHub Actions workflows for CI, isolated PR validation, and deployment. Docker Compose and the documented Railway layout both use a public `webhook` service (`python -m webhook.main`) and a single `agents` service (`python -m run_all_agents`). Configure the required environment variables and Actions secrets before enabling live webhooks or deployment triggers.
 
 ## Repository layout
 

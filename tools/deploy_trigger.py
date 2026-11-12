@@ -1,0 +1,109 @@
+"""LangChain tool: trigger a GitHub Actions workflow and poll until completion."""
+
+from __future__ import annotations
+
+import os
+import time
+
+from langchain_core.tools import tool
+
+
+def _normalize_repo(value: str) -> str:
+    """Accept 'owner/repo' or a full GitHub URL and return 'owner/repo'."""
+    v = (value or "").strip().rstrip("/")
+    for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
+        if v.startswith(prefix):
+            v = v[len(prefix) :]
+            break
+    if v.endswith(".git"):
+        v = v[: -len(".git")]
+    return v
+
+
+@tool
+def trigger_deployment(
+    ref: str = "main",
+    repo: str | None = None,
+    workflow_file: str | None = None,
+) -> dict:
+    """Trigger workflow_dispatch on the target deploy repo and poll until done.
+
+    Returns: {"success": bool, "run_id": int, "run_url": str, "status": str, "error": str}
+    """
+    from github import Github
+
+    token = os.environ["GITHUB_TOKEN"]
+    # The deploy target is FIXED by TARGET_REPO. Prefer it over any `repo` the model passes —
+    # DeployAgent's small model sometimes hands a wrong/hallucinated repo here (e.g. the head
+    # branch or a stale name), which 404s. Env wins; the model arg is only a fallback.
+    target_repo = _normalize_repo(os.environ.get("TARGET_REPO") or repo or "")
+    wf_file = workflow_file or os.environ.get("DEPLOY_WORKFLOW_FILE", "deploy.yml")
+
+    # Resolve get_repo + dispatch together. get_repo 404s if TARGET_REPO/token are wrong, and
+    # if that raises here it CRASHES the agent's turn (message permanently failed → the chain
+    # dies at Deploy). A tool must NEVER raise inside the Band adapter — catch everything and
+    # return a structured FAILED so DeployAgent can still hand off to ReportAgent.
+    g = Github(token)
+    try:
+        r = g.get_repo(target_repo)
+        wf = r.get_workflow(wf_file)
+        wf.create_dispatch(ref=ref, inputs={})
+    except Exception as exc:  # noqa: BLE001 - never crash the agent
+        return {
+            "success": False,
+            "run_id": None,
+            "run_url": "",
+            "status": "FAILED",
+            "error": f"{type(exc).__name__}: {exc}"[:200],
+        }
+
+    # Give Actions a moment to register the run
+    time.sleep(4)
+
+    run_id, run_url = _find_latest_run(r, wf.id, ref)
+    if not run_id:
+        return {
+            "success": False,
+            "run_id": None,
+            "run_url": "",
+            "status": "FAILED",
+            "error": "Run not found after dispatch",
+        }
+
+    # Poll only briefly. The chain must not stall for minutes waiting on Actions — DeployAgent
+    # confirms the deploy started, hands off to ReportAgent, and ReportAgent's audit reads the
+    # final run conclusion. A fast echo deploy usually finishes inside this window anyway.
+    result = _poll_run(r, run_id, timeout=60)
+    result["run_id"] = run_id
+    result["run_url"] = run_url
+    return result
+
+
+def _find_latest_run(repo, workflow_id: int, branch: str) -> tuple[int | None, str]:
+    try:
+        runs = list(repo.get_workflow_runs(workflow_id=workflow_id, branch=branch))
+        if runs:
+            return runs[0].id, runs[0].html_url
+    except Exception:
+        pass
+    return None, ""
+
+
+def _poll_run(repo, run_id: int, timeout: int) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            run = repo.get_workflow_run(run_id)
+            if run.status == "completed":
+                success = run.conclusion == "success"
+                return {
+                    "success": success,
+                    "status": "READY" if success else "FAILED",
+                    "error": "" if success else f"conclusion={run.conclusion}",
+                }
+        except Exception as exc:
+            return {"success": False, "status": "FAILED", "error": str(exc)}
+        time.sleep(5)
+    # Still running — the dispatch succeeded, so this is a success for hand-off purposes.
+    # ReportAgent's audit reads the actual conclusion from the run.
+    return {"success": True, "status": "TRIGGERED", "error": ""}

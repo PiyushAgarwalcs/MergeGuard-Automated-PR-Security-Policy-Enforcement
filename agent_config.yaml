@@ -1,0 +1,58 @@
+# Per-agent configuration: which Band identity, which open-source model, which provider.
+# Model assignment follows the blueprint; provider is OpenAI-compatible (featherless | aimlapi).
+# llm_factory.py reads this + .env to build each agent's ChatOpenAI client.
+
+defaults:
+  provider: featherless
+  # temperature 0 = greedy/deterministic decoding. The agents only orchestrate (the real
+  # analysis lives in the tools), so we want the SAME tool calls + hand-off every run — no
+  # creative wandering. This is the main lever for verdict consistency.
+  temperature: 0
+  max_tokens: 2048
+  request_timeout: 120
+
+agents:
+  # NOTE: all five agents use the SAME model on purpose. Featherless is serverless and
+  # rate-limits/cold-loads when you rapidly switch between distinct models mid-chain
+  # (the 429s that stall the full 5-agent run). Using one model keeps it warm = far fewer
+  # 429s. The real analysis lives in the deterministic tools, so the model only orchestrates
+  # (call tool -> hand off) — a non-coder Instruct model is plenty.
+  scan:
+    id_env: SCAN_AGENT_ID
+    key_env: SCAN_AGENT_API_KEY
+    provider: featherless
+    model: Qwen/Qwen3-30B-A3B-Instruct-2507    # shared model (no switch penalty)
+  security:
+    id_env: SECURITY_AGENT_ID
+    key_env: SECURITY_AGENT_API_KEY
+    provider: featherless
+    model: Qwen/Qwen3-30B-A3B-Instruct-2507    # shared model (no switch penalty)
+  risk:
+    id_env: RISK_AGENT_ID
+    key_env: RISK_AGENT_API_KEY
+    provider: featherless
+    # Was Qwen3-235B (high concurrency-unit cost that 429'd under the small Featherless plan).
+    # The 0–100 risk math lives in the calculate_risk_score tool; the LLM only orchestrates.
+    model: Qwen/Qwen3-30B-A3B-Instruct-2507      # judgment / synthesis, low concurrency cost
+  deploy:
+    id_env: DEPLOY_AGENT_ID
+    key_env: DEPLOY_AGENT_API_KEY
+    provider: featherless
+    # Was Qwen3-8B — too weak to reliably emit the deploy tool-call + hand-off (it replied in
+    # plain text, which Band drops, stalling the chain at Deploy). Use the 30B workhorse that
+    # Risk/Report already run on.
+    model: Qwen/Qwen3-30B-A3B-Instruct-2507      # reliable tool calling + hand-off
+  report:
+    id_env: REPORT_AGENT_ID
+    key_env: REPORT_AGENT_API_KEY
+    provider: featherless
+    model: Qwen/Qwen3-30B-A3B-Instruct-2507      # structured writing (verified on Featherless)
+
+# Map provider name -> env vars holding base_url + api_key (resolved in llm_factory.py)
+providers:
+  featherless:
+    base_url_env: FEATHERLESS_BASE_URL
+    api_key_env: FEATHERLESS_API_KEY
+  aimlapi:
+    base_url_env: AIMLAPI_BASE_URL
+    api_key_env: AIMLAPI_API_KEY
